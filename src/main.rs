@@ -1,29 +1,42 @@
-use std::fs;
-use std::io::{self, Write};
-use serde::{Serialize, Deserialize};
-use serde_json;
 use clap::{Arg, Command};
-use chrono::{NaiveDate, Utc}; // For deadline and date handling
-use std::collections::HashSet; // For tags
+use serde::{Deserialize, Serialize};
+use std::fs;
+use chrono::Local;
 
-#[derive(Serialize, Deserialize, Debug, Clone)] 
-struct Task {
-    description: String,
-    completed: bool,
-    priority: u8, // Priority field (1-5)
-    due_date: Option<NaiveDate>, // Due date for tasks
-    tags: HashSet<String>, // Tags for categorizing tasks
-    recurrence: Option<String>, // Recurrence frequency (daily, weekly, etc.)
-    depends_on: Option<usize>, // Task dependencies (index of the task this depends on)
+// Import the modules
+mod gui;
+mod models;
+mod ui;
+mod utils;
+
+// Re-export Task from main.rs since it's referenced by other modules
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Task {
+    pub description: String,
+    pub completed: bool,
+    pub priority: u8,
+    pub deadline: Option<i64>,  // UNIX timestamp for deadline
 }
 
 const FILE_PATH: &str = "tasks.json";
 
+// Function to load tasks from the JSON file
+pub fn load_tasks() -> Vec<Task> {
+    let file_content = fs::read_to_string(FILE_PATH).unwrap_or_else(|_| "[]".to_string());
+    serde_json::from_str(&file_content).unwrap_or_else(|_| Vec::new())
+}
+
+// Function to save tasks to the JSON file
+pub fn save_tasks(tasks: &Vec<Task>) {
+    let json = serde_json::to_string_pretty(tasks).expect("Failed to serialize tasks");
+    fs::write(FILE_PATH, json).expect("Failed to save tasks");
+}
+
 fn main() {
-    let matches = Command::new("Rust To-Do CLI")
-        .version("1.0")
+    let matches = Command::new("TaskForge")
+        .version("2.0")
         .author("Your Name")
-        .about("Manage your tasks from the terminal")
+        .about("Manage your tasks efficiently from terminal or GUI")
         .subcommand(Command::new("add")
             .about("Add a new task")
             .arg(Arg::new("task")
@@ -32,16 +45,11 @@ fn main() {
             .arg(Arg::new("priority")
                 .required(true)
                 .help("Priority of the task (1-5)"))
-            .arg(Arg::new("due_date")
+            .arg(Arg::new("deadline")
                 .required(false)
-                .help("Due date for the task in format YYYY-MM-DD"))
-            .arg(Arg::new("tags")
-                .required(false)
-                .help("Comma separated tags for the task"))
-            .arg(Arg::new("recurrence")
-                .required(false)
-                .help("Recurrence of the task (e.g., 'daily', 'weekly')")))
+                .help("Optional deadline in YYYY-MM-DD format")))
         .subcommand(Command::new("list").about("List all tasks"))
+        .subcommand(Command::new("today").about("List tasks due today"))
         .subcommand(Command::new("complete")
             .about("Mark a task as completed")
             .arg(Arg::new("index")
@@ -49,27 +57,20 @@ fn main() {
                 .help("The task index to mark as completed")))
         .subcommand(Command::new("completed")
             .about("Display the number of completed tasks"))
-        .subcommand(Command::new("search")
-            .about("Search for tasks by keyword")
-            .arg(Arg::new("keyword")
-                .required(true)
-                .help("The keyword to search for in task descriptions")))
+        .subcommand(Command::new("gui")
+            .about("Launch the GUI version of the app"))
         .get_matches();
 
-        if matches.subcommand_name().is_none() {
-            println!("Available commands:");
-            println!("  add <task_description> <priority>  - Add a new task with priority (1-5)");
-            println!("  list                               - List all tasks, sorted by priority");
-            println!("  complete <task_index>              - Mark a task as completed");
-            println!("  completed                         - Show the number of completed tasks");
-            println!("  search <keyword>                  - Search for tasks by keyword");
-            println!("  filter <status>                   - Filter tasks by completion status (completed/incomplete)");
-            println!("  due <date>                        - List tasks by due date (YYYY-MM-DD)");
-            println!("  overdue                           - List tasks that are overdue");
-            return;
+    // If the "gui" command is passed, launch the GUI
+    if let Some(_matches) = matches.subcommand_matches("gui") {
+        // Run the GUI application with egui
+        if let Err(e) = gui::TodoAppGUI::run(None) {
+            eprintln!("Failed to run GUI: {}", e);
         }
-        
+        return;
+    }
 
+    // Otherwise, handle CLI commands
     let mut tasks = load_tasks();
 
     if let Some(matches) = matches.subcommand_matches("add") {
@@ -77,27 +78,39 @@ fn main() {
             if let Some(priority_str) = matches.get_one::<String>("priority") {
                 if let Ok(priority) = priority_str.parse::<u8>() {
                     if priority >= 1 && priority <= 5 {
-                        let due_date = matches.get_one::<String>("due_date").and_then(|date_str| {
-                            NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok()
+                        // Parse optional deadline if provided
+                        let deadline = matches.get_one::<String>("deadline").and_then(|date_str| {
+                            // Parse YYYY-MM-DD format
+                            match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                                Ok(date) => {
+                                    // Create a datetime with end of day (23:59:59)
+                                    let naive_datetime = date.and_hms_opt(23, 59, 59).unwrap();
+                                    // Convert to timestamp
+                                    Some(naive_datetime.and_utc().timestamp())
+                                },
+                                Err(_) => {
+                                    println!("Warning: Could not parse deadline '{}'. Format should be YYYY-MM-DD.", date_str);
+                                    None
+                                }
+                            }
                         });
-
-                        let tags = matches.get_one::<String>("tags")
-                            .map(|tags_str| tags_str.split(',').map(|s| s.trim().to_string()).collect::<HashSet<String>>())
-                            .unwrap_or_else(HashSet::new);
-
-                        let recurrence = matches.get_one::<String>("recurrence").map(|rec| rec.to_string());
-
+                        
                         tasks.push(Task {
                             description: task_desc.clone(),
                             completed: false,
                             priority,
-                            due_date,
-                            tags,
-                            recurrence,
-                            depends_on: None, // No dependency by default
+                            deadline,
                         });
+                        
                         save_tasks(&tasks);
-                        println!("Task added: '{}', Priority: {}, Due: {:?}", task_desc, priority, due_date);
+                        
+                        let deadline_msg = if let Some(_) = deadline {
+                            format!(" with deadline {}", matches.get_one::<String>("deadline").unwrap())
+                        } else {
+                            "".to_string()
+                        };
+                        
+                        println!("Task added: '{}', Priority: {}{}", task_desc, priority, deadline_msg);
                     } else {
                         println!("Priority must be between 1 and 5.");
                     }
@@ -107,13 +120,50 @@ fn main() {
             }
         }
     } else if matches.subcommand_matches("list").is_some() {
+        // Sort tasks by priority (1 is most urgent)
         let mut sorted_tasks = tasks.clone();
         sorted_tasks.sort_by_key(|task| task.priority);
 
         for (i, task) in sorted_tasks.iter().enumerate() {
-            let status = if task.completed { "✔" } else { "✘" };
-            println!("{}: [{}] [{}] {} Due: {:?} Tags: {:?} Recurrence: {:?}",
-                     i, status, task.priority, task.description, task.due_date, task.tags, task.recurrence);
+            let status = if task.completed { "✅" } else { "❌" };
+            let deadline_str = match task.deadline {
+                Some(timestamp) => {
+                    let datetime = chrono::NaiveDateTime::from_timestamp_opt(timestamp, 0).unwrap();
+                    let local_datetime = chrono::DateTime::<Local>::from_naive_utc_and_offset(
+                        datetime,
+                        *Local::now().offset()
+                    );
+                    format!(" [Due: {}]", local_datetime.format("%Y-%m-%d %H:%M"))
+                },
+                None => "".to_string()
+            };
+            
+            println!("{}: [{}] [P{}] {}{}", i, status, task.priority, task.description, deadline_str);
+        }
+    } else if matches.subcommand_matches("today").is_some() {
+        // Filter tasks due today
+        let today = Local::now().date_naive();
+        let today_start = today.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+        let today_end = today.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp();
+        
+        let today_tasks: Vec<&Task> = tasks.iter()
+            .filter(|task| {
+                if let Some(deadline) = task.deadline {
+                    deadline >= today_start && deadline <= today_end
+                } else {
+                    false
+                }
+            })
+            .collect();
+            
+        if today_tasks.is_empty() {
+            println!("No tasks due today.");
+        } else {
+            println!("Tasks due today:");
+            for (i, task) in today_tasks.iter().enumerate() {
+                let status = if task.completed { "✅" } else { "❌" };
+                println!("{}: [{}] [P{}] {}", i + 1, status, task.priority, task.description);
+            }
         }
     } else if let Some(matches) = matches.subcommand_matches("complete") {
         if let Some(index_str) = matches.get_one::<String>("index") {
@@ -130,23 +180,5 @@ fn main() {
     } else if matches.subcommand_matches("completed").is_some() {
         let completed_count = tasks.iter().filter(|task| task.completed).count();
         println!("Completed tasks: {}/{}", completed_count, tasks.len());
-    } else if let Some(matches) = matches.subcommand_matches("search") {
-        if let Some(keyword) = matches.get_one::<String>("keyword") {
-            for (i, task) in tasks.iter().enumerate() {
-                if task.description.contains(keyword) {
-                    println!("{}: [{}] [{}] {}", i, task.completed, task.priority, task.description);
-                }
-            }
-        }
     }
-}
-
-fn load_tasks() -> Vec<Task> {
-    let file_content = fs::read_to_string(FILE_PATH).unwrap_or_else(|_| "[]".to_string());
-    serde_json::from_str(&file_content).unwrap_or_else(|_| Vec::new())
-}
-
-fn save_tasks(tasks: &Vec<Task>) {
-    let json = serde_json::to_string_pretty(tasks).expect("Failed to serialize tasks");
-    fs::write(FILE_PATH, json).expect("Failed to save tasks");
 }
